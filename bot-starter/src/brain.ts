@@ -39,7 +39,7 @@ export const DEFAULT_PARAMS: Params = {
   share: 0.35,
   kMin: 1.2,
   kMax: 8,
-  maxFrac: 0.45,
+  maxFrac: 0.6,
   // Spend-down ramp over the last rampN auctions (leftover coins score 0).
   rampN: 12,
   rampPow: 1.0,
@@ -55,8 +55,9 @@ export const DEFAULT_PARAMS: Params = {
   endgame: 2,
   // Play a 6-letter word once this few auctions remain.
   sixLate: 10,
-  // Balance below which we cash words to keep bidding.
-  lowCash: 12,
+  // Balance below which we cash words to keep bidding (live field pays
+  // 8-20 a letter; at 12 coins the bot deadlocked bidding 5 for 14 auctions).
+  lowCash: 22,
   // Rack size at which we force a play.
   maxRack: 13,
   // Target fraction of vowels in the rack.
@@ -305,7 +306,8 @@ export function chooseWords(view: MatchView, p: Params = DEFAULT_PARAMS): string
   }
   // Short of cash or rack overflowing: play the best word, at least 4 long
   // if possible.
-  if (view.myBalance < p.lowCash! || n >= p.maxRack!) {
+  const poor = view.myBalance < Math.max(p.lowCash!, 1.5 * (view.avgPaid ?? 0));
+  if (poor || n >= p.maxRack!) {
     const w = cands.find((c) => c.len >= 4) ?? cands[0]!;
     return validate([w.word], rack);
   }
