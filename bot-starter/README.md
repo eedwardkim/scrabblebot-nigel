@@ -29,14 +29,19 @@ waiting for a tournament to start).
   won and played letters, and recent prices.
 - `src/brain.ts`: pure decision functions, shared with the simulator.
   - `decideBid`: letter value = max(exact cash-out gain from
-    `bestPartition`, future bingo potential from face value × expected
-    multiplier × rack fit + flexibility), with the future part fading as the
-    bag empties. Coins per point come from **budget pacing**: balance over the
-    value still expected to buy, so unspent money (worth 0 at the end) pushes
-    bids up on its own. One letter can't take more than 45% of the bankroll
-    mid-game. The whole balance goes on the second-to-last letter (if it
-    helps) and on the final letter (free denial, since a sim that wins it
-    plays it inside the closing transaction).
+    `bestPartition`, expected future gain). The future gain is a small
+    **Monte Carlo**: draw a few likely future letters from the unseen pool
+    (ledger) and measure how much the letter raises `bestPartition`, blended
+    with a hand-set potential (face value × expected multiplier × rack fit).
+    Coins per point come from **budget pacing**: balance over the value still
+    expected to buy, so unspent money (worth 0 at the end) pushes bids up on
+    its own, and a **spend-down ramp** over the last 12 auctions makes sure the
+    bankroll is gone by the end. The whole balance goes on the second-to-last
+    letter (if it helps) and on the final letter (free denial, since a sim
+    that wins it plays it inside the closing transaction). Under first-price
+    auctions bids are shaded to just above the estimated rival bid.
+    Tuned in `sim/`: head-to-head against the previous brain it finishes
+    2.9 vs 4.05 on average and wins 24% vs 10% of six-seat matches.
   - `chooseWords`: play any 7+ word at once (3x is the cap, so waiting gains
     nothing), 6-letter words in the last 10 auctions, cash words when short of
     money or the rack overflows, and cash the full `bestPartition` in the last

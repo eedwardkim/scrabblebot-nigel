@@ -148,7 +148,10 @@ function bidOn(c: DbConnection, auctionId: bigint, matchId: bigint, letter: stri
   if (ms > 50) warn(`slow decideBid ${ms.toFixed(0)}ms`);
   c.reducers
     .submitBid({ auctionId, amount: BigInt(bid) })
-    .catch((e: unknown) => warn(`bid ${bid} on '${letter}' (auction ${auctionId}) failed: ${e instanceof Error ? e.message : e}`));
+    .catch((e: unknown) => {
+      warn(`bid ${bid} on '${letter}' (auction ${auctionId}) failed: ${e instanceof Error ? e.message : e}`);
+      myBids.delete(k); // recompute from fresh state on the next act()
+    });
 }
 
 function rebidOpen(c: DbConnection) {
@@ -183,6 +186,8 @@ function playWords(c: DbConnection) {
     }
     if (ok.length === 0) continue;
     inflightWords.set(mk, ok.length);
+    // A call on a dropped socket never settles; never hold the lock forever.
+    setTimeout(() => inflightWords.set(mk, 0), 5000);
     for (const word of ok) {
       log(`match ${matchId} bag=${view.bagTotal}: playing '${word}' (+${wordReward(word)})`);
       c.reducers
@@ -392,6 +397,8 @@ function onConnect(c: DbConnection, identity: Identity, token: string) {
   const rackChanged = safe("rack", () => setImmediate(safe("act", () => act(c))));
   c.db.myRack.onInsert(rackChanged);
   c.db.myRack.onUpdate(rackChanged);
+  c.db.myRack.onDelete(rackChanged);
+  c.db.matchParticipant.onUpdate(rackChanged);
   c.db.botCredential.onInsert(
     safe("cred", () => {
       if (myBotId === null) myBotId = resolveMyBotId(c);
@@ -441,6 +448,10 @@ function scheduleReconnect(why: string) {
 
 function connect() {
   log(`connecting to ${DB_NAME} at ${HOST}`);
+  // Handles and locks belong to the old connection.
+  matchSubs.clear();
+  inflightWords.clear();
+  myBids.clear();
   try {
     conn = DbConnection.builder()
       .withUri(HOST)

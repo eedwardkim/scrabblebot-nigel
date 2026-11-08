@@ -187,7 +187,7 @@ const FLEX: Record<number, number> = {
 
 export function letterValue(view: MatchView, letter: string, p: Params = DEFAULT_PARAMS): number {
   const i = letter.charCodeAt(0) - 65;
-  if (i < 0 || i >= 26) return 0;
+  if (!(i >= 0 && i < 26)) return 0;
   // The final auction closes the match: nothing won there can be played.
   if (view.bagTotal <= 0) return 0;
   const rack = toCounts(view.myRack);
@@ -200,7 +200,8 @@ export function letterValue(view: MatchView, letter: string, p: Params = DEFAULT
   const potential = (VALUES[i]! * letterMult(i, p) + (FLEX[i] ?? 0) * p.flexScale!) * fit(rack, i, p);
   // Option value fades as the match runs out of letters to build with.
   const w = Math.min(1, future / 12);
-  const ev = evGain(view, rack, i, future, p);
+  // Monte Carlo on a huge rack is too slow for the 1 s window; rely on the potential term.
+  const ev = tileCount(rack) >= 14 ? 0 : evGain(view, rack, i, future, p);
   const opt = p.evW! * ev + p.potW! * potential;
   return Math.max(nowGain, w * opt + (1 - w) * nowGain);
 }
@@ -244,7 +245,7 @@ export function decideBid(
     bid = Math.min(bid, Math.max(est + 1, price + 1, bid * 0.6));
     bid = Math.min(bid, maxRival + 1);
   }
-  bid = Math.floor(Math.max(0, Math.min(bal, bid)));
+  bid = Number.isFinite(bid) ? Math.floor(Math.max(0, Math.min(bal, bid))) : 0;
   return { bid, value };
 }
 

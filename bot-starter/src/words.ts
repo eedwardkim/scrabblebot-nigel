@@ -136,6 +136,7 @@ export interface Cand {
 // Every dictionary multiset contained in the rack (one representative word
 // each), found by walking the sorted-letter trie. Cached by rack key.
 const candCache = new Map<string, Cand[]>();
+let candCacheCands = 0; // ~320 B each; cap by total objects, not entries
 export function candidates(c: Counts): Cand[] {
   const key = countsKey(c);
   const hit = candCache.get(key);
@@ -161,7 +162,11 @@ export function candidates(c: Counts): Cand[] {
   };
   walk(0, 0, 0, 0);
   out.sort((a, b) => b.reward - a.reward || b.len - a.len);
-  if (candCache.size > 50_000) candCache.clear();
+  candCacheCands += out.length;
+  if (candCacheCands > 1_000_000) {
+    candCache.clear();
+    candCacheCands = out.length;
+  }
   candCache.set(key, out);
   return out;
 }
