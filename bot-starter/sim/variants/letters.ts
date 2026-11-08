@@ -30,9 +30,9 @@ export type Params = Record<string, number>;
 
 export const DEFAULT_PARAMS: Params = {
   // Expected length multiplier a kept tile ends up earning.
-  mult: 2.6,
+  mult: 3.0,
   // Scale on the bid relative to estimated score value (Vickrey: ~truthful).
-  aggression: 1.0,
+  aggression: 1.2,
   // Budget pacing: share of future letter value we expect to buy, and
   // clamps on the coins-per-point exchange rate.
   share: 0.35,
@@ -51,7 +51,19 @@ export const DEFAULT_PARAMS: Params = {
   maxRack: 13,
   // Target fraction of vowels in the rack.
   vowelTarget: 0.42,
+  sFlex: 2.5,
+  flexScale: 1.5,
+  dup1: 0.75,
+  dup2: 0.3,
+  qNoU: 0.45,
+  heavyCap: 2.4,
+  midCap: 2.6,
 };
+// env overrides for sweeping (LV_mult=2.8 etc)
+for (const k of Object.keys(DEFAULT_PARAMS)) {
+  const e = process.env["LV_" + k];
+  if (e !== undefined) DEFAULT_PARAMS[k] = Number(e);
+}
 
 const VOWELS = new Set([0, 4, 8, 14, 20]); // A E I O U
 
@@ -74,10 +86,10 @@ function fit(c: Counts, i: number, p: Params): number {
   }
   const have = c[i]!;
   const dupOk = i === 4 || i === 18; // E, S tolerate duplicates
-  if (have === 1) f *= dupOk ? 0.95 : 0.75;
-  else if (have >= 2) f *= dupOk ? 0.6 : 0.3;
+  if (have === 1) f *= dupOk ? 0.95 : p.dup1!;
+  else if (have >= 2) f *= dupOk ? 0.6 : p.dup2!;
   // Q without U is nearly dead in ENABLE (no QI): QAT, QAID, QOPH, FAQIR...
-  if (i === 16 && c[20]! === 0) f *= 0.45;
+  if (i === 16 && c[20]! === 0) f *= p.qNoU!;
   if (i === 20 && c[16]! > 0 && c[20]! === 0) f *= 1.6;
   return f;
 }
@@ -85,8 +97,8 @@ function fit(c: Counts, i: number, p: Params): number {
 // Multiplier a letter realistically earns (heavy tiles rarely fit 7+ words).
 function letterMult(i: number, p: Params): number {
   const v = VALUES[i]!;
-  if (v >= 8) return Math.min(p.mult!, 2.0);
-  if (v >= 4) return Math.min(p.mult!, 2.4);
+  if (v >= 8) return Math.min(p.mult!, p.heavyCap!);
+  if (v >= 4) return Math.min(p.mult!, p.midCap!);
   return p.mult!;
 }
 
@@ -117,7 +129,8 @@ export function letterValue(view: MatchView, letter: string, p: Params = DEFAULT
   // Auctions after this one whose letters we could still play.
   const future = view.bagTotal - 1;
   if (future <= 0) return nowGain;
-  const potential = (VALUES[i]! * letterMult(i, p) + (FLEX[i] ?? 0)) * fit(rack, i, p);
+  const flex = (i === 18 ? p.sFlex! : (FLEX[i] ?? 0)) * p.flexScale!;
+  const potential = (VALUES[i]! * letterMult(i, p) + flex) * fit(rack, i, p);
   // Option value fades as the match runs out of letters to build with.
   const w = Math.min(1, future / 12);
   return Math.max(nowGain, w * potential + (1 - w) * nowGain);

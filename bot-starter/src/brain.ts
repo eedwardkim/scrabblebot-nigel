@@ -10,6 +10,7 @@ import {
   subtractWord,
   tileCount,
   toCounts,
+  countsKey,
   VALUES,
   type Counts,
 } from "./words.js";
@@ -39,6 +40,15 @@ export const DEFAULT_PARAMS: Params = {
   kMin: 1.2,
   kMax: 8,
   maxFrac: 0.45,
+  // Spend-down ramp over the last rampN auctions (leftover coins score 0).
+  rampN: 12,
+  rampPow: 1.0,
+  // Letter valuation tweaks (from letters variant).
+  flexScale: 1.0,
+  heavyCap: 2.0,
+  midCap: 2.4,
+  // FirstPrice: cap bid at maxRival+1 and floor at an estimated rival bid.
+  fpFrac: 0.5,
   // Flat premium for any tile (denial / price-setting).
   floor: 1,
   // Cash out everything once this many auctions or fewer remain.
@@ -51,7 +61,77 @@ export const DEFAULT_PARAMS: Params = {
   maxRack: 13,
   // Target fraction of vowels in the rack.
   vowelTarget: 0.42,
+  // Monte-Carlo expected-gain valuation.
+  mcN: 16,
+  mcKFrac: 0.2,
+  mcKMax: 4,
+  mcBudget: 4000,
+  evW: 1.0,
+  potW: 0.5,
 };
+
+function mulberry32(a: number) {
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function hashStr(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+// Draws of k letters from unseen (without replacement), cached by rack+k.
+interface Draws { racks: Counts[]; base: number[] }
+const drawCache = new Map<string, Draws>();
+function getDraws(rack: Counts, unseen: Map<string, number>, k: number, p: Params): Draws {
+  const key = countsKey(rack) + "|" + k;
+  const hit = drawCache.get(key);
+  if (hit) return hit;
+  const pool: number[] = [];
+  for (const [l, n] of unseen) {
+    const i = l.charCodeAt(0) - 65;
+    if (i < 0 || i >= 26) continue;
+    for (let j = 0; j < n; j++) pool.push(i);
+  }
+  const rnd = mulberry32(hashStr(key));
+  const racks: Counts[] = [];
+  const base: number[] = [];
+  const N = Math.round(p.mcN!);
+  for (let s = 0; s < N; s++) {
+    const r = rack.slice();
+    // partial Fisher-Yates on a copy of indices
+    const m = Math.min(k, pool.length);
+    const used = new Set<number>();
+    for (let d = 0; d < m; d++) {
+      let idx = Math.floor(rnd() * pool.length);
+      let tries = 0;
+      while (used.has(idx) && tries++ < 20) idx = Math.floor(rnd() * pool.length);
+      used.add(idx);
+      r[pool[idx]!]!++;
+    }
+    racks.push(r);
+    base.push(bestPartition(r, p.mcBudget!).total);
+  }
+  if (drawCache.size > 5000) drawCache.clear();
+  const out = { racks, base };
+  drawCache.set(key, out);
+  return out;
+}
+function evGain(view: MatchView, rack: Counts, i: number, future: number, p: Params): number {
+  const k = Math.min(p.mcKMax!, Math.round(future * p.mcKFrac!));
+  if (k <= 0) return 0;
+  const d = getDraws(rack, view.unseen, k, p);
+  let sum = 0;
+  for (let s = 0; s < d.racks.length; s++) {
+    const r = d.racks[s]!.slice();
+    r[i]!++;
+    sum += Math.max(0, bestPartition(r, p.mcBudget!).total - d.base[s]!);
+  }
+  return d.racks.length ? sum / d.racks.length : 0;
+}
 
 const VOWELS = new Set([0, 4, 8, 14, 20]); // A E I O U
 
@@ -85,8 +165,8 @@ function fit(c: Counts, i: number, p: Params): number {
 // Multiplier a letter realistically earns (heavy tiles rarely fit 7+ words).
 function letterMult(i: number, p: Params): number {
   const v = VALUES[i]!;
-  if (v >= 8) return Math.min(p.mult!, 2.0);
-  if (v >= 4) return Math.min(p.mult!, 2.4);
+  if (v >= 8) return Math.min(p.mult!, p.heavyCap!);
+  if (v >= 4) return Math.min(p.mult!, p.midCap!);
   return p.mult!;
 }
 
@@ -117,10 +197,12 @@ export function letterValue(view: MatchView, letter: string, p: Params = DEFAULT
   // Auctions after this one whose letters we could still play.
   const future = view.bagTotal - 1;
   if (future <= 0) return nowGain;
-  const potential = (VALUES[i]! * letterMult(i, p) + (FLEX[i] ?? 0)) * fit(rack, i, p);
+  const potential = (VALUES[i]! * letterMult(i, p) + (FLEX[i] ?? 0) * p.flexScale!) * fit(rack, i, p);
   // Option value fades as the match runs out of letters to build with.
   const w = Math.min(1, future / 12);
-  return Math.max(nowGain, w * potential + (1 - w) * nowGain);
+  const ev = evGain(view, rack, i, future, p);
+  const opt = p.evW! * ev + p.potW! * potential;
+  return Math.max(nowGain, w * opt + (1 - w) * nowGain);
 }
 
 export function decideBid(
@@ -147,9 +229,20 @@ export function decideBid(
   if (future > 5) bid = Math.min(bid, bal * p.maxFrac!);
   if (future <= 0 && value > 0) bid = bal; // second-to-last: money is about to be worthless
   else if (future <= 3 && value > 0) bid = Math.max(bid, Math.min(bal, value * 3));
+  if (value > 0 && future < p.rampN!) {
+    const f = Math.pow(1 - future / p.rampN!, p.rampPow!);
+    bid = Math.max(bid, bal * f);
+  }
   if (view.auctionType === "FirstPrice") {
-    // Pay-your-bid: shade toward the going price rather than our value.
-    bid = Math.min(bid, Math.max(price + 1, bid * 0.6));
+    // Pay-your-bid: shade to just above an estimated rival bid, never above
+    // what the richest rival could pay.
+    const rivals = view.opponents.map((o) => Math.max(0, Math.floor(o.balance)));
+    const maxRival = rivals.length ? Math.max(...rivals) : 0;
+    const sorted = rivals.slice().sort((a, b) => b - a);
+    const second = sorted[1] ?? 0;
+    const est = Math.min(second, Math.max(price, maxRival * p.fpFrac! * (value / Math.max(1, value + 4))));
+    bid = Math.min(bid, Math.max(est + 1, price + 1, bid * 0.6));
+    bid = Math.min(bid, maxRival + 1);
   }
   bid = Math.floor(Math.max(0, Math.min(bal, bid)));
   return { bid, value };

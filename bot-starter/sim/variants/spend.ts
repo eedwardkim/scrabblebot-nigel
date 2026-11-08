@@ -36,9 +36,13 @@ export const DEFAULT_PARAMS: Params = {
   // Budget pacing: share of future letter value we expect to buy, and
   // clamps on the coins-per-point exchange rate.
   share: 0.35,
-  kMin: 1.2,
-  kMax: 8,
-  maxFrac: 0.45,
+  kMin: 2.0,
+  kMax: 12,
+  maxFrac: 0.7,
+  // Spend-down: over the last rampN auctions, ramp bids toward the whole
+  // balance for any letter that raises bestPartition now.
+  rampN: 12,
+  rampPow: 1.0,
   // Flat premium for any tile (denial / price-setting).
   floor: 1,
   // Cash out everything once this many auctions or fewer remain.
@@ -147,6 +151,10 @@ export function decideBid(
   if (future > 5) bid = Math.min(bid, bal * p.maxFrac!);
   if (future <= 0 && value > 0) bid = bal; // second-to-last: money is about to be worthless
   else if (future <= 3 && value > 0) bid = Math.max(bid, Math.min(bal, value * 3));
+  if (value > 0 && future < p.rampN!) {
+    const f = Math.pow(1 - future / p.rampN!, p.rampPow!);
+    bid = Math.max(bid, bal * f);
+  }
   if (view.auctionType === "FirstPrice") {
     // Pay-your-bid: shade toward the going price rather than our value.
     bid = Math.min(bid, Math.max(price + 1, bid * 0.6));

@@ -51,6 +51,14 @@ export const DEFAULT_PARAMS: Params = {
   maxRack: 13,
   // Target fraction of vowels in the rack.
   vowelTarget: 0.42,
+  // (a) play a 6-letter word when balance is below this (0 = off).
+  sixLowCash: 0,
+  // (b) rack size at which we play the best 5+ word (99 = off).
+  fiveRack: 99,
+  // (c) in the endgame window, only value letters by their partition gain.
+  endgameGainOnly: 0,
+  // (d) weight of the leave's bestPartition when picking a bingo.
+  leaveW: 0.3,
 };
 
 const VOWELS = new Set([0, 4, 8, 14, 20]); // A E I O U
@@ -134,8 +142,14 @@ export function decideBid(
   // final letter still plays it inside the closing transaction. Bidding our
   // whole balance there is free denial.
   if (view.bagTotal <= 0) return { bid: bal, value: 0 };
-  const value = letterValue(view, letter, p);
+  let value = letterValue(view, letter, p);
   const future = view.bagTotal - 1;
+  if (p.endgameGainOnly! > 0 && future <= p.endgameGainOnly!) {
+    const rack = toCounts(view.myRack);
+    const gain = bestPartition(addLetter(rack, letter)).total - bestPartition(rack).total;
+    const price = Math.max(2, view.avgPaid ?? 4);
+    value = gain > price / 3 ? gain : 0;
+  }
   // Budget pacing. Unspent money scores nothing, so the exchange rate
   // between score and coins is what we hold over the value we still expect
   // to buy. Not winning makes balance pile up and bids rise on their own.
@@ -175,7 +189,7 @@ export function chooseWords(view: MatchView, p: Params = DEFAULT_PARAMS): string
     let bestScore = -1;
     for (const b of bingos) {
       const leave = subtractWord(rack, b.word);
-      const s = b.reward + 0.3 * bestPartition(leave, 4000).total;
+      const s = b.reward + p.leaveW! * bestPartition(leave, 4000).total;
       if (s > bestScore) {
         bestScore = s;
         best = b;
@@ -183,9 +197,13 @@ export function chooseWords(view: MatchView, p: Params = DEFAULT_PARAMS): string
     }
     return validate([best.word], rack);
   }
-  if (left <= p.sixLate!) {
+  if (left <= p.sixLate! || view.myBalance < p.sixLowCash!) {
     const six = cands.find((c) => c.len === 6);
     if (six) return validate([six.word], rack);
+  }
+  if (n >= p.fiveRack!) {
+    const five = cands.find((c) => c.len >= 5);
+    if (five) return validate([five.word], rack);
   }
   // Short of cash or rack overflowing: play the best word, at least 4 long
   // if possible.
