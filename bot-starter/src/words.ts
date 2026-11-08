@@ -137,7 +137,9 @@ export interface Cand {
 // each), found by walking the sorted-letter trie. Cached by rack key.
 const candCache = new Map<string, Cand[]>();
 let candCacheCands = 0; // ~320 B each; cap by total objects, not entries
-export function candidates(c: Counts): Cand[] {
+const CAND_CACHE_MAX = 150_000; // ~50 MB
+// cache=false for throwaway racks (Monte Carlo samples) so they never pile up.
+export function candidates(c: Counts, cache = true): Cand[] {
   const key = countsKey(c);
   const hit = candCache.get(key);
   if (hit) return hit;
@@ -162,10 +164,15 @@ export function candidates(c: Counts): Cand[] {
   };
   walk(0, 0, 0, 0);
   out.sort((a, b) => b.reward - a.reward || b.len - a.len);
+  if (!cache) return out;
   candCacheCands += out.length;
-  if (candCacheCands > 1_000_000) {
-    candCache.clear();
-    candCacheCands = out.length;
+  if (candCacheCands > CAND_CACHE_MAX) {
+    // Evict oldest entries (Map keeps insertion order) down to half the cap.
+    for (const [k, v] of candCache) {
+      candCache.delete(k);
+      candCacheCands -= v.length;
+      if (candCacheCands <= CAND_CACHE_MAX / 2) break;
+    }
   }
   candCache.set(key, out);
   return out;
@@ -195,14 +202,14 @@ export interface Partition {
 // Branch-and-bound over candidates sorted by reward, with a node budget so
 // it can never stall the event loop.
 const partCache = new Map<string, Partition>();
-export function bestPartition(c: Counts, nodeBudget = 40_000): Partition {
+export function bestPartition(c: Counts, nodeBudget = 40_000, cache = true): Partition {
   const key = countsKey(c);
   const hit = partCache.get(key);
   if (hit) return hit;
-  const cands = candidates(c);
+  const cands = candidates(c, cache);
   let best: Partition = { total: 0, words: [] };
   if (cands.length === 0) {
-    partCache.set(key, best);
+    if (cache) partCache.set(key, best);
     return best;
   }
   const rest = c.slice();
@@ -228,6 +235,7 @@ export function bestPartition(c: Counts, nodeBudget = 40_000): Partition {
     }
   };
   dfs(0, 0);
+  if (!cache) return best;
   if (partCache.size > 50_000) partCache.clear();
   partCache.set(key, best);
   return best;

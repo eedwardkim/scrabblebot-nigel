@@ -62,10 +62,13 @@ export const DEFAULT_PARAMS: Params = {
   // Target fraction of vowels in the rack.
   vowelTarget: 0.42,
   // Monte-Carlo expected-gain valuation.
-  mcN: 16,
+  mcN: 12,
   mcKFrac: 0.2,
-  mcKMax: 4,
+  mcKMax: 3,
   mcBudget: 4000,
+  // Wall-clock cap on sampling per letterValue call (ms); never miss a bid.
+  mcMs: 35,
+  mcMinSamples: 3,
   evW: 1.0,
   potW: 0.5,
 };
@@ -84,7 +87,8 @@ function hashStr(s: string): number {
   return h >>> 0;
 }
 // Draws of k letters from unseen (without replacement), cached by rack+k.
-interface Draws { racks: Counts[]; base: number[] }
+// base[s] is the sample's partition value, computed lazily (-1 = not yet).
+interface Draws { racks: Counts[]; base: number[]; ready: boolean }
 const drawCache = new Map<string, Draws>();
 function getDraws(rack: Counts, unseen: Map<string, number>, k: number, p: Params): Draws {
   const key = countsKey(rack) + "|" + k;
@@ -99,8 +103,10 @@ function getDraws(rack: Counts, unseen: Map<string, number>, k: number, p: Param
   const rnd = mulberry32(hashStr(key));
   const racks: Counts[] = [];
   const base: number[] = [];
-  const N = Math.round(p.mcN!);
-  for (let s = 0; s < N; s++) {
+  // Fewer samples on big racks: each partition there costs several ms.
+  const tiles = tileCount(rack);
+  const N = Math.max(0, Math.round(tiles <= 8 ? p.mcN! : Math.max(4, (p.mcN! * 8) / tiles)));
+  for (let s = 0; s < N && pool.length > 0; s++) {
     const r = rack.slice();
     // partial Fisher-Yates on a copy of indices
     const m = Math.min(k, pool.length);
@@ -113,22 +119,37 @@ function getDraws(rack: Counts, unseen: Map<string, number>, k: number, p: Param
       r[pool[idx]!]!++;
     }
     racks.push(r);
-    base.push(bestPartition(r, p.mcBudget!).total);
+    base.push(-1);
   }
-  if (drawCache.size > 5000) drawCache.clear();
-  const out = { racks, base };
+  if (drawCache.size > 2000) drawCache.clear();
+  const out = { racks, base, ready: false };
   drawCache.set(key, out);
   return out;
 }
-function evGain(view: MatchView, rack: Counts, i: number, future: number, p: Params): number {
+// Sample racks are throwaway: never cache their candidate lists (memory).
+// The first call for a rack fixes the sample set: bases are computed until
+// the deadline (a slow handler means a missed auction) and the rest are
+// dropped, so later calls for the same rack are deterministic.
+function evGain(view: MatchView, rack: Counts, i: number, future: number, p: Params, deadline: number): number {
   const k = Math.min(p.mcKMax!, Math.round(future * p.mcKFrac!));
   if (k <= 0) return 0;
   const d = getDraws(rack, view.unseen, k, p);
+  if (!d.ready) {
+    const minS = p.mcMinSamples ?? 3;
+    let s = 0;
+    for (; s < d.racks.length; s++) {
+      if (s >= minS && performance.now() > deadline) break;
+      d.base[s] = bestPartition(d.racks[s]!, p.mcBudget!, false).total;
+    }
+    d.racks.length = s;
+    d.base.length = s;
+    d.ready = true;
+  }
   let sum = 0;
   for (let s = 0; s < d.racks.length; s++) {
     const r = d.racks[s]!.slice();
     r[i]!++;
-    sum += Math.max(0, bestPartition(r, p.mcBudget!).total - d.base[s]!);
+    sum += Math.max(0, bestPartition(r, p.mcBudget!, false).total - d.base[s]!);
   }
   return d.racks.length ? sum / d.racks.length : 0;
 }
@@ -201,7 +222,8 @@ export function letterValue(view: MatchView, letter: string, p: Params = DEFAULT
   // Option value fades as the match runs out of letters to build with.
   const w = Math.min(1, future / 12);
   // Monte Carlo on a huge rack is too slow for the 1 s window; rely on the potential term.
-  const ev = tileCount(rack) >= 14 ? 0 : evGain(view, rack, i, future, p);
+  const deadline = performance.now() + (p.mcMs ?? 35);
+  const ev = tileCount(rack) >= 12 ? 0 : evGain(view, rack, i, future, p, deadline);
   const opt = p.evW! * ev + p.potW! * potential;
   return Math.max(nowGain, w * opt + (1 - w) * nowGain);
 }

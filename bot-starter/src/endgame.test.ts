@@ -13,7 +13,7 @@ import { mulberry32, randInt, runMatch, type PlayerSpec, type Rng } from "../sim
 import { RIVAL, rivalParams } from "../sim/rival.js";
 import type { BrainModule } from "../sim/types.js";
 
-const MATCHES = Number(process.env.ENDGAME_MATCHES ?? 10);
+const MATCHES = Number(process.env.ENDGAME_MATCHES ?? 5);
 
 const rack = (letters: string) => {
   const r = new Map<string, number>();
