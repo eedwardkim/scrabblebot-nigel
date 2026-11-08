@@ -20,6 +20,7 @@ import {
   runMatch,
 } from "./engine.js";
 import type { BrainModule, Params } from "./types.js";
+import { RIVAL, rivalParams } from "./rival.js";
 import {
   BAG_COUNTS,
   findBestPlayable,
@@ -47,6 +48,10 @@ function parseArgs(argv: string[]): Record<string, string> {
 
 async function loadBrain(which: string): Promise<{ brain: BrainModule; source: string }> {
   const real = resolve(HERE, "../src/brain.ts");
+  if (which.includes("/") || which.endsWith(".ts")) {
+    const mod = (await import(resolve(process.cwd(), which))) as BrainModule;
+    return { brain: mod, source: which };
+  }
   if (which !== "placeholder" && existsSync(real)) {
     const mod = (await import("../src/brain.js")) as BrainModule;
     return { brain: mod, source: "src/brain.ts" };
@@ -79,6 +84,15 @@ function simDealer(rng: Rng): () => PlayerSpec {
   return () => ({ kind: "sim", strategy: pool.pop() ?? STRATS[randInt(rng, 0, 2)]! });
 }
 
+// The committed src/brain.ts, used as the opponent in self-play tables even
+// when --brain points at a variant.
+let DEFAULT_MODULE: BrainModule | undefined;
+function jitter(p: Params, rng: Rng): Params {
+  const out: Params = {};
+  for (const [k, v] of Object.entries(p)) out[k] = k === "endgame" ? v : v * (0.8 + 0.4 * rng());
+  return out;
+}
+
 function tablePlayers(
   table: string,
   rng: Rng,
@@ -92,6 +106,19 @@ function tablePlayers(
     case "mixed":
       // A lone real bot whose lobby timed out: padded with 5 of the 6 sims.
       return [brain, ...Array.from({ length: 5 }, () => randomSim())];
+    case "live":
+      // The live lobby: five rivals bidding at the observed price levels.
+      return [brain, ...Array.from({ length: 5 }, (_, i): PlayerSpec => ({ kind: "brain", label: "rival", module: RIVAL, params: rivalParams(rng, i) }))];
+    case "live4":
+      // Two of us against four rivals (self-consistency: both should rank 1-2).
+      return [brain, { kind: "brain", label: "brain-default", params: defaults }, ...Array.from({ length: 4 }, (_, i): PlayerSpec => ({ kind: "brain", label: "rival", module: RIVAL, params: rivalParams(rng, i) }))];
+    case "selfmix":
+      // Us against five jittered copies of our own default brain (DEFAULT
+      // module) plus nothing else: the hardest field we can model.
+      return [brain, ...Array.from({ length: 5 }, (_, i): PlayerSpec => ({ kind: "brain", label: "self-jit", module: DEFAULT_MODULE!, params: jitter(defaults, rng) }))];
+    case "hard":
+      // Three jittered copies of the default brain and two market rivals.
+      return [brain, ...Array.from({ length: 3 }, (): PlayerSpec => ({ kind: "brain", label: "self-jit", module: DEFAULT_MODULE!, params: jitter(defaults, rng) })), ...Array.from({ length: 2 }, (_, i): PlayerSpec => ({ kind: "brain", label: "rival", module: RIVAL, params: rivalParams(rng, i) }))];
     case "starters":
       return [brain, ...Array.from({ length: 5 }, (): PlayerSpec => ({ kind: "starter" }))];
     case "self":
@@ -192,6 +219,7 @@ async function main() {
   }
 
   const { brain, source } = await loadBrain(args.brain ?? "auto");
+  DEFAULT_MODULE = (await loadBrain("auto")).brain;
   const brainParams: Params | undefined = args.params
     ? { ...brain.DEFAULT_PARAMS, ...(JSON.parse(args.params) as Params) }
     : undefined;

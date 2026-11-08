@@ -15,7 +15,7 @@ export type AuctionType = "Vickrey" | "FirstPrice";
 
 export type PlayerSpec =
   | { kind: "sim"; strategy: Strategy; label?: string }
-  | { kind: "brain"; params?: Params; label: string }
+  | { kind: "brain"; params?: Params; label: string; module?: BrainModule }
   | { kind: "starter"; label?: string }
   | { kind: "idle"; label?: string };
 
@@ -288,7 +288,7 @@ export function runMatch(config: MatchConfig, rng: Rng): MatchResult {
           if (w) applyWord(p, w);
         }
       } else if (spec.kind === "brain") {
-        const brain = config.brain!;
+        const brain = spec.module ?? config.brain!;
         // The live bot (src/index.ts playWords) calls chooseWords again each
         // time its submitted words land, until it returns nothing to play.
         for (let round = 0; round < 32; round++) {
