@@ -2,7 +2,7 @@
 //   --table mixed|starters|self|idle|custom   (custom needs --config JSON)
 //   --params '{"k":1}'        override the first brain's params
 //   --auction Vickrey|FirstPrice|both   (default Vickrey; both = coin flip per match)
-//   --brain auto|placeholder  (auto = ../src/brain.ts if it exists)
+//   --brain auto|placeholder|real  (auto = ../src/brain.ts if it exists)
 //   --json                    print a JSON summary instead of the table
 //   --check N                 verify fast word search == server scan on N random racks
 import { existsSync } from "node:fs";
@@ -57,10 +57,27 @@ async function loadBrain(which: string): Promise<{ brain: BrainModule; source: s
 }
 
 const STRATS: Strategy[] = ["Cheapskate", "ValueBidder", "Aggressive"];
-const randomSim = (rng: Rng): PlayerSpec => ({
-  kind: "sim",
-  strategy: STRATS[randInt(rng, 0, 2)]!,
-});
+// The sim bots `init` seeds (spacetimedb/src/index.ts). A lobby that times
+// out pads with distinct sims from this pool, shuffled (lobby.ts
+// resolveLobby), so a table holds at most two of each strategy.
+const SIM_POOL: Strategy[] = [
+  "Cheapskate", // Cheapo-sim
+  "ValueBidder", // Valor-sim
+  "Aggressive", // Brutus-sim
+  "ValueBidder", // Hagrid-sim
+  "Aggressive", // Maverick-sim
+  "Cheapskate", // Snippet-sim
+];
+// Deals sims from a freshly shuffled pool, one per call; once the pool is
+// used up (custom tables only), any strategy at random.
+function simDealer(rng: Rng): () => PlayerSpec {
+  const pool = SIM_POOL.slice();
+  for (let i = pool.length - 1; i >= 1; i--) {
+    const j = randInt(rng, 0, i);
+    [pool[i], pool[j]] = [pool[j]!, pool[i]!];
+  }
+  return () => ({ kind: "sim", strategy: pool.pop() ?? STRATS[randInt(rng, 0, 2)]! });
+}
 
 function tablePlayers(
   table: string,
@@ -70,9 +87,11 @@ function tablePlayers(
   custom: PlayerSpec[] | undefined,
 ): PlayerSpec[] {
   const brain: PlayerSpec = { kind: "brain", label: "brain", params: brainParams ?? defaults };
+  const randomSim = simDealer(rng);
   switch (table) {
     case "mixed":
-      return [brain, ...Array.from({ length: 5 }, () => randomSim(rng))];
+      // A lone real bot whose lobby timed out: padded with 5 of the 6 sims.
+      return [brain, ...Array.from({ length: 5 }, () => randomSim())];
     case "starters":
       return [brain, ...Array.from({ length: 5 }, (): PlayerSpec => ({ kind: "starter" }))];
     case "self":
@@ -81,8 +100,8 @@ function tablePlayers(
         { kind: "brain", label: "brain-default", params: defaults },
         { kind: "starter" },
         { kind: "starter" },
-        randomSim(rng),
-        randomSim(rng),
+        randomSim(),
+        randomSim(),
       ];
     case "idle":
       return [
@@ -97,7 +116,7 @@ function tablePlayers(
       if (!custom) throw new Error("--table custom needs --config JSON");
       let firstBrainSeen = false;
       return custom.map((p) => {
-        if (p.kind === "sim" && (p.strategy as string) === "random") return randomSim(rng);
+        if (p.kind === "sim" && (p.strategy as string) === "random") return randomSim();
         if (p.kind !== "brain") return p;
         const params =
           !firstBrainSeen && brainParams ? brainParams : { ...defaults, ...(p.params ?? {}) };
@@ -145,6 +164,7 @@ interface Agg {
   scores: number[];
   places: number[];
   rejected: number;
+  rejectedBids: number;
   balance: number;
   leftover: number;
   won: number;
@@ -158,6 +178,9 @@ async function main() {
   const seed = Number(args.seed ?? 1);
   const table = args.table ?? "mixed";
   const auctionArg = args.auction ?? "Vickrey";
+  if (!["Vickrey", "FirstPrice", "both"].includes(auctionArg)) {
+    throw new Error(`--auction must be Vickrey, FirstPrice or both, not ${auctionArg}`);
+  }
 
   const t0 = performance.now();
   wordIndex();
@@ -201,13 +224,14 @@ async function main() {
     for (const p of res.players as PlayerResult[]) {
       let a = aggs.get(p.label);
       if (!a) {
-        a = { label: p.label, n: 0, scores: [], places: [], rejected: 0, balance: 0, leftover: 0, won: 0, words: 0, spent: 0 };
+        a = { label: p.label, n: 0, scores: [], places: [], rejected: 0, rejectedBids: 0, balance: 0, leftover: 0, won: 0, words: 0, spent: 0 };
         aggs.set(p.label, a);
       }
       a.n++;
       a.scores.push(p.score);
       a.places.push(p.place);
       a.rejected += p.rejectedWords;
+      a.rejectedBids += p.rejectedBids;
       a.balance += p.balance;
       a.leftover += p.leftoverTiles;
       a.won += p.lettersWon;
@@ -232,6 +256,7 @@ async function main() {
       winPct: placeDist[0]!,
       placeDist,
       avgRejected: a.rejected / a.n,
+      avgRejectedBids: a.rejectedBids / a.n,
       avgBalance: a.balance / a.n,
       avgLeftoverTiles: a.leftover / a.n,
       avgLettersWon: a.won / a.n,
@@ -272,6 +297,7 @@ async function main() {
     "win%".padStart(6),
     ...Array.from({ length: maxPlayers }, (_, k) => `${k + 1}%`.padStart(6)),
     "rej".padStart(5),
+    "rejB".padStart(5),
     "bal".padStart(6),
     "rack".padStart(5),
     "won".padStart(5),
@@ -290,6 +316,7 @@ async function main() {
         f(r.winPct).padStart(6),
         ...r.placeDist.map((p) => f(p).padStart(6)),
         f(r.avgRejected, 2).padStart(5),
+        f(r.avgRejectedBids, 2).padStart(5),
         f(r.avgBalance).padStart(6),
         f(r.avgLeftoverTiles).padStart(5),
         f(r.avgLettersWon).padStart(5),

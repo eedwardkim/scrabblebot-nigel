@@ -23,6 +23,8 @@ export interface MatchConfig {
   players: PlayerSpec[];
   auctionType?: AuctionType; // default Vickrey (lobby default)
   brain?: BrainModule; // required if any player is a brain
+  // Called after each auction closes (debugging / cross-checks).
+  onClose?: (ev: { letter: string; bids: { who: number; amount: number }[]; winner?: number; paid: number }) => void;
   startingBalance?: number; // 100
   startingRackSize?: number; // 5
 }
@@ -37,6 +39,7 @@ export interface PlayerResult {
   wordsPlayed: number;
   words: string[];
   rejectedWords: number;
+  rejectedBids: number;
   leftoverTiles: number;
   place: number;
 }
@@ -127,6 +130,7 @@ interface PState {
   spent: number;
   words: string[];
   rejected: number;
+  rejectedBids: number;
   starterDirty: boolean;
 }
 
@@ -183,6 +187,7 @@ export function runMatch(config: MatchConfig, rng: Rng): MatchResult {
     spent: 0,
     words: [],
     rejected: 0,
+    rejectedBids: 0,
     starterDirty: true, // starter checks its dealt rack in the first window
   }));
 
@@ -212,6 +217,14 @@ export function runMatch(config: MatchConfig, rng: Rng): MatchResult {
   }
 
   const revealed = new Array<number>(26).fill(0);
+  // auctionResult.paid for every auction with a winner, in close order
+  // (src/ledger.ts pushes these and the live bot passes avgPaid()).
+  const paidHistory: number[] = [];
+  const avgPaid = (): number | undefined => {
+    const xs = paidHistory.slice(-15);
+    if (xs.length === 0) return undefined;
+    return xs.reduce((a, b) => a + b, 0) / xs.length;
+  };
 
   const viewFor = (me: number): MatchView => {
     const p = ps[me]!;
@@ -234,6 +247,7 @@ export function runMatch(config: MatchConfig, rng: Rng): MatchResult {
       unseen,
       opponents: ps.filter((_, j) => j !== me).map((o) => ({ balance: o.balance, score: o.score })),
       numPlayers: n,
+      avgPaid: avgPaid(),
     };
   };
 
@@ -259,24 +273,44 @@ export function runMatch(config: MatchConfig, rng: Rng): MatchResult {
       const p = ps[j]!;
       const spec = p.spec;
       if (spec.kind === "starter") {
-        if (p.starterDirty) {
-          const w = findBestPlayableCounts(p.rack, 2);
-          if (w) applyWord(p, w); // rack changed again -> stay dirty
-          else p.starterDirty = false;
-        }
+        // The starter (git HEAD src/index.ts) bids once, synchronously in
+        // auction.onInsert, so it bids with its rack and balance at the open,
+        // before the word it submits this window lands.
         const amt = starterBid(li, p.rack[li]!, p.balance);
         if (amt > 0) bids.push({ who: j, amount: amt });
+        // It tries one word per rack change (deal or auction win). The rack
+        // change caused by its own word arrives inside the 500ms
+        // WORD_RETRY_MS throttle (or is a delete, which it doesn't watch), so
+        // it does not try again until it wins another letter.
+        if (p.starterDirty) {
+          p.starterDirty = false;
+          const w = findBestPlayableCounts(p.rack, 2);
+          if (w) applyWord(p, w);
+        }
       } else if (spec.kind === "brain") {
         const brain = config.brain!;
-        const words = brain.chooseWords(viewFor(j), spec.params);
-        if (Array.isArray(words)) {
-          for (const w of words) if (!tryPlay(p, w)) p.rejected++;
+        // The live bot (src/index.ts playWords) calls chooseWords again each
+        // time its submitted words land, until it returns nothing to play.
+        for (let round = 0; round < 32; round++) {
+          const words = brain.chooseWords(viewFor(j), spec.params);
+          if (!Array.isArray(words) || words.length === 0) break;
+          let played = 0;
+          for (const w of words) {
+            if (tryPlay(p, w)) played++;
+            else p.rejected++;
+          }
+          if (played === 0) break;
         }
         const res = brain.decideBid(viewFor(j), letter, spec.params);
-        let amt = Math.floor(Number(res?.bid));
-        if (!Number.isFinite(amt)) amt = 0;
-        amt = Math.max(0, Math.min(amt, p.balance));
-        if (amt > 0) bids.push({ who: j, amount: amt });
+        // submitBid takes an i64 and rejects a negative bid or one above the
+        // balance; the live bot's BigInt(bid) throws on a fraction or NaN.
+        // Any of those means no bid this auction.
+        const amt = Number(res?.bid);
+        if (!Number.isInteger(amt) || amt < 0 || amt > p.balance) {
+          p.rejectedBids++;
+        } else if (amt > 0) {
+          bids.push({ who: j, amount: amt });
+        }
       }
     }
 
@@ -294,6 +328,8 @@ export function runMatch(config: MatchConfig, rng: Rng): MatchResult {
           : second
             ? second.amount
             : Math.min(1, first.amount);
+      // auctionResult records winner and paid even if the winner can't pay.
+      paidHistory.push(paid);
       const w = ps[first.who]!;
       if (w.balance >= paid) {
         w.balance -= paid;
@@ -309,6 +345,12 @@ export function runMatch(config: MatchConfig, rng: Rng): MatchResult {
         }
       }
     }
+    config.onClose?.({
+      letter,
+      bids: bids.map((x) => ({ ...x })),
+      winner: first?.who,
+      paid: first ? (auctionType === "FirstPrice" ? first.amount : second ? second.amount : Math.min(1, first.amount)) : 0,
+    });
     // Unbid letters are discarded.
     li = draw();
   }
@@ -323,6 +365,7 @@ export function runMatch(config: MatchConfig, rng: Rng): MatchResult {
     wordsPlayed: p.words.length,
     words: p.words,
     rejectedWords: p.rejected,
+    rejectedBids: p.rejectedBids,
     leftoverTiles: p.rack.reduce((a, b) => a + b, 0),
     place: 1 + ps.filter((o) => o.score > p.score).length,
   }));

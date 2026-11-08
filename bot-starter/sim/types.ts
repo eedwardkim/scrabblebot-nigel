@@ -9,6 +9,9 @@ export interface MatchView {
   unseen: Map<string, number>;
   opponents: { balance: number; score: number }[];
   numPlayers: number;
+  // Mean price paid over the last 15 auctions that had a winner (as
+  // src/ledger.ts avgPaid computes it); undefined before any.
+  avgPaid?: number;
 }
 export type Params = Record<string, number>;
 
